@@ -1,0 +1,12 @@
+# BrandVerity — do not commit local/dev artefacts
+# Local Python environment and caches
+backend/.venv/
+__pycache__/
+*.pyc
+# Local dev database (seeded locally; Postgres schema is in backend/schema.sql)
+backend/brandverity.db
+# Frontend build output and dependencies
+frontend/node_modules/
+frontend/.next/
+# OS / editor artefacts
+.DS_Store
