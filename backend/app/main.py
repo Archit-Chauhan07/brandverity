@@ -427,3 +427,32 @@ def insights(tenant_id: int | None = None, user: User = Depends(get_current_user
         per_status[d.status] = per_status.get(d.status, 0) + 1
     return {"tenant_id": tid, "findings_per_rule": per_rule,
             "drafts_per_status": per_status}
+
+
+# ---------- demo repair (observable) ----------
+@app.get("/demo-reset")
+def demo_reset(db: Session = Depends(get_db)):
+    """Demo-only repair: ensure the 4 public demo accounts exist with the
+    documented demo password, and report what changed. Unlike the
+    import-time repair (invisible on serverless), calling this shows the
+    result, so a login failure can be traced to the stored accounts or
+    ruled out. It only touches the 4 demo usernames."""
+    tenant = db.query(Tenant).filter(Tenant.name == "Northpeak Coffee").first()
+    if tenant is None:
+        raise HTTPException(status_code=500, detail="Demo tenant missing")
+    want = hash_password("demo123")
+    report: dict[str, str] = {}
+    for _username, _role in [("admin", "Admin"), ("creator", "Creator"),
+                             ("manager", "Manager"), ("reviewer", "Reviewer")]:
+        _user = db.query(User).filter(User.username == _username).first()
+        if _user is None:
+            db.add(User(username=_username, password_hash=want,
+                        role=_role, tenant_id=tenant.id))
+            report[_username] = "created"
+        elif _user.password_hash != want:
+            _user.password_hash = want
+            report[_username] = "password fixed"
+        else:
+            report[_username] = "already ok"
+    db.commit()
+    return {"tenant": tenant.name, "users": report}
