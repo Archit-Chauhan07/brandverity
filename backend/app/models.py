@@ -12,6 +12,7 @@ class Tenant(Base):
     users = relationship("User", back_populates="tenant")
     rules = relationship("Rule", back_populates="tenant")
     drafts = relationship("Draft", back_populates="tenant")
+    custom_rules = relationship("CustomRule", back_populates="tenant")
 
 
 class User(Base):
@@ -33,6 +34,25 @@ class Rule(Base):
     category = Column(String, nullable=False)
     text = Column(Text, nullable=False)
     tenant = relationship("Tenant", back_populates="rules")
+
+
+class CustomRule(Base):
+    """A brand-library rule defined by a tenant's own admin, in a generic
+    machine-checkable form (not Northpeak's hardcoded rules). One row is one
+    version; a new version of the same rule_code supersedes older rows.
+    kind: forbidden_words | fact_year | palette.
+    params: forbidden_words -> {"words": [...]};
+            fact_year -> {"year": 2019};
+            palette -> {"hex": "#RRGGBB", "tolerance": 100}."""
+    __tablename__ = "custom_rules"
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    rule_code = Column(String, nullable=False, index=True)
+    version = Column(String, nullable=False, default="v1")
+    kind = Column(String, nullable=False)
+    params = Column(JSON, nullable=False, default=dict)
+    text = Column(Text, nullable=False)
+    tenant = relationship("Tenant", back_populates="custom_rules")
 
 
 class Draft(Base):
