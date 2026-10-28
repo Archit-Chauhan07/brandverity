@@ -41,6 +41,29 @@ export default function Home() {
         <Link className="btn secondary" href="/queue">Approval queue</Link>
         <Link className="btn secondary" href="/insights">Insights</Link>
       </p>
+      <div className="card">
+        <h2>Try it in one click</h2>
+        <p className="muted">
+          Pick a sample — the upload form opens prefilled. Log in as creator
+          (password <code>demo123</code>), press &ldquo;Create draft &amp; run
+          review&rdquo;, and watch what the checker does.
+        </p>
+        <p>
+          <Link className="btn" href="/upload?sample=flagged">
+            Flagged draft
+          </Link>{" "}
+          <Link className="btn secondary" href="/upload?sample=clean">
+            Clean draft
+          </Link>{" "}
+          <Link className="btn secondary" href="/upload?sample=ambiguous">
+            Needs human review
+          </Link>
+        </p>
+        <p className="muted">
+          Flagged breaks three rules at once. Clean passes with no findings.
+          Ambiguous breaks no hard rule but needs a human to judge its tone.
+        </p>
+      </div>
       <p className="muted">
         Demo logins (password <code>demo123</code>): admin / Admin, creator /
         Creator, manager / Manager, reviewer / Reviewer.
