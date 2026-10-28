@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .database import Base, engine, get_db
+from .database import Base, SessionLocal, engine, get_db
 from .models import Approval, AuditLog, Comment, Draft, Finding, Rule, Tenant, User
 from .pipeline import RULE_TEXTS, run_pipeline
 
@@ -48,6 +48,39 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, password_hash: str) -> bool:
     return hash_password(password) == password_hash
+
+
+# Demo seeding for hosts with no manual seed step (e.g. serverless):
+# on import, if the database has no tenant yet, create the Northpeak
+# demo tenant, its 4 demo users (password "demo123") and the 6 rules.
+# Same data as seed.py, idempotent (the empty check skips it once data
+# exists), and never crashes the app: a seed failure is printed and
+# the API still starts.
+try:
+    _seed_db = SessionLocal()
+    try:
+        if _seed_db.query(Tenant).count() == 0:
+            _tenant = Tenant(name="Northpeak Coffee")
+            _seed_db.add(_tenant)
+            _seed_db.commit()
+            _seed_db.refresh(_tenant)
+            for _username, _role in [("admin", "Admin"), ("creator", "Creator"),
+                                     ("manager", "Manager"), ("reviewer", "Reviewer")]:
+                _seed_db.add(User(username=_username,
+                                  password_hash=hash_password("demo123"),
+                                  role=_role, tenant_id=_tenant.id))
+            for _code, _category in [("BR-FACT-01", "fact"), ("BR-TONE-01", "tone"),
+                                     ("BR-TERM-01", "term"), ("BR-CLAIM-01", "claim"),
+                                     ("BR-VIS-01", "visual"),
+                                     ("BR-ACC-01", "accessibility")]:
+                _seed_db.add(Rule(tenant_id=_tenant.id, rule_code=_code, version="v1",
+                                  category=_category, text=RULE_TEXTS[_code]))
+            _seed_db.commit()
+            print("Demo seed: created Northpeak Coffee tenant, users and rules.")
+    finally:
+        _seed_db.close()
+except Exception as _seed_exc:
+    print(f"Demo seed skipped: {_seed_exc}")
 
 
 def get_current_user(authorization: str | None = Header(default=None),
