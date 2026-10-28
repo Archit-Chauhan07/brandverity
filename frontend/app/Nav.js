@@ -25,6 +25,7 @@ export default function Nav() {
       <Link href="/upload">Upload</Link>
       <Link href="/queue">Queue</Link>
       <Link href="/insights">Insights</Link>
+      <Link href="/brands">Brands</Link>
       <span className="spacer" />
       {user ? (
         <>
