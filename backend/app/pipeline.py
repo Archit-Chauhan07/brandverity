@@ -67,18 +67,88 @@ def contrast_ratio(fg_hex: str, bg_hex: str) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
-def run_pipeline(body: str, content_type: str, meta: dict):
+def run_custom_rules(body: str, content_type: str, meta: dict, custom_rules):
+    """Check a draft against a tenant's own generic rules (see CustomRule).
+
+    Each rule is a dict with rule_code, version, kind, params, text. Only
+    the latest version per rule_code should be passed in. Returns findings
+    in the same shape as the Northpeak checks."""
+    body = body or ""
+    meta = meta or {}
+    low = body.lower()
+    findings = []
+    for rule in custom_rules or []:
+        code = rule.get("rule_code", "")
+        version = rule.get("version", "v1")
+        kind = rule.get("kind", "")
+        params = rule.get("params") or {}
+        text = rule.get("text", "")
+        if kind == "forbidden_words" and content_type == "text":
+            for word in params.get("words") or []:
+                if _word_present(low, str(word).lower()):
+                    span = _find_span(body, [str(word)])
+                    findings.append({
+                        "rule_code": code, "rule_version": version,
+                        "quoted_span": span,
+                        "why": f"Forbidden by {code}: {span!r} is not allowed. {text}",
+                        "suggested_edit": f"Remove {span!r}.",
+                    })
+        elif kind == "fact_year" and content_type == "text":
+            try:
+                year = int(params.get("year"))
+            except (TypeError, ValueError):
+                continue
+            m = re.search(r"since\s+(\d{4})", body, re.IGNORECASE)
+            if m and m.group(1) != str(year):
+                findings.append({
+                    "rule_code": code, "rule_version": version,
+                    "quoted_span": m.group(0),
+                    "why": f"Founding year {m.group(1)} conflicts with the library "
+                           f"fact (founded {year}): {text}",
+                    "suggested_edit": f"Since {year}",
+                })
+        elif kind == "palette" and content_type == "image":
+            primary = meta.get("primary_color")
+            hex_brand = params.get("hex")
+            try:
+                tolerance = float(params.get("tolerance", 100))
+            except (TypeError, ValueError):
+                tolerance = 100.0
+            if primary and hex_brand:
+                try:
+                    dist = _rgb_distance(_hex_to_rgb(primary), _hex_to_rgb(hex_brand))
+                    if dist > tolerance:
+                        findings.append({
+                            "rule_code": code, "rule_version": version,
+                            "quoted_span": str(primary),
+                            "why": f"Primary colour {primary} is off-brand (RGB distance "
+                                   f"{dist:.0f} from {hex_brand}): {text}",
+                            "suggested_edit": f"Use primary colour {hex_brand}.",
+                        })
+                except ValueError:
+                    pass
+    return findings
+
+
+def run_pipeline(body: str, content_type: str, meta: dict, custom_rules=None,
+                 tenant_name: str | None = None):
     """Return (findings, needs_human_review, note).
 
     Each finding: dict with rule_code, rule_version, quoted_span, why,
     suggested_edit. Hard findings only; the abstain path never cites a rule.
+
+    Northpeak's hardcoded checks run only for the Northpeak tenant (or when
+    no tenant is given, for backward compatibility). Other tenants are
+    checked only against their own custom rules, so one brand's library
+    never polices another brand's drafts.
     """
     body = body or ""
     meta = meta or {}
     low = body.lower()
     findings = []
+    northpeak = tenant_name is None or tenant_name == "Northpeak Coffee"
 
-    if content_type == "text":
+    if northpeak and content_type == "text":
         # BR-TONE-01: superlatives
         tone_hits = [w for w in ("best", "#1", "world's", "worlds") if _word_present(low, w)]
         # "#1" has no word boundary on the digit side; fall back to substring.
@@ -128,7 +198,7 @@ def run_pipeline(body: str, content_type: str, meta: dict):
                        f"(founded 2019): {RULE_TEXTS['BR-FACT-01']}",
                 "suggested_edit": "Since 2019",
             })
-    elif content_type == "image":
+    elif northpeak and content_type == "image":
         # BR-VIS-01: primary colour distance from #1F4D3A
         primary = meta.get("primary_color")
         if primary:
@@ -186,10 +256,16 @@ def run_pipeline(body: str, content_type: str, meta: dict):
             except ValueError:
                 pass
 
+    # The tenant's own generic rules run for every tenant, after the
+    # Northpeak checks (which are skipped for other brands).
+    findings.extend(run_custom_rules(body, content_type, meta, custom_rules))
+
     # Abstain path: no hard findings + subjective wording -> human review.
+    # Northpeak-only: another brand's drafts must not be held for review
+    # over wording its own library never restricted.
     needs_human_review = False
     note = None
-    if not findings and content_type == "text":
+    if northpeak and not findings and content_type == "text":
         hit = next((w for w in SUBJECTIVE_WORDS if _word_present(low, w)), None)
         if hit:
             needs_human_review = True
