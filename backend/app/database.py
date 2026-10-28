@@ -9,6 +9,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./brandverity.db")
+# Render (and some other hosts) hand out postgres:// URLs, but SQLAlchemy
+# requires postgresql://, so normalize the scheme here. SQLite URLs are
+# untouched by this.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = "postgresql://" + DATABASE_URL[len("postgres://"):]
 
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):

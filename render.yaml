@@ -1,0 +1,23 @@
+# Render blueprint for BrandVerity (backend + Postgres).
+# Deploy: connect the GitHub repo to Render and apply this blueprint, or
+# create the services manually with the same settings. After the backend
+# deploys, run `python seed.py` once against the deployed database
+# (Render Shell, with DATABASE_URL set) so Northpeak, its 6 rules, and
+# the demo users (password demo123) exist — main.py creates empty tables
+# on startup but does not seed them.
+services:
+  - type: web
+    name: brandverity-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: brandverity-db
+          property: connectionString
+databases:
+  - name: brandverity-db
+    databaseName: brandverity
+    user: brandverity
