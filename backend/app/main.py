@@ -15,7 +15,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
-from .models import Approval, AuditLog, Comment, Draft, Finding, Rule, Tenant, User
+from .models import (Approval, AuditLog, Comment, CustomRule, Draft, Finding,
+                     Rule, Tenant, User)
 from .pipeline import RULE_TEXTS, run_pipeline
 
 Base.metadata.create_all(bind=engine)
@@ -193,6 +194,18 @@ class DecisionBody(BaseModel):
     decision: str  # accept | reject
 
 
+class TenantBody(BaseModel):
+    name: str = ""
+
+
+class CustomRuleBody(BaseModel):
+    rule_code: str = ""
+    kind: str = ""  # forbidden_words | fact_year | palette
+    params: dict | None = None
+    text: str = ""
+    version: str | None = None  # omitted -> auto (v1, then v2, v3, ...)
+
+
 # ---------- auth ----------
 @app.post("/auth/login")
 def login(payload: LoginBody, db: Session = Depends(get_db)):
@@ -224,6 +237,116 @@ def list_rules(tenant_id: int, user: User = Depends(get_current_user),
     rules = db.query(Rule).filter(Rule.tenant_id == tenant_id).all()
     return [{"id": r.id, "tenant_id": r.tenant_id, "rule_code": r.rule_code,
              "version": r.version, "category": r.category, "text": r.text} for r in rules]
+
+
+@app.post("/tenants")
+def create_tenant(payload: TenantBody, user: User = Depends(get_current_user),
+                  db: Session = Depends(get_db)):
+    """Create a brand (tenant) with its own demo accounts. Admin only.
+    Demo usernames are globally unique, so a new brand's accounts are
+    suffixed with the brand slug (e.g. creator-harbor-roasters)."""
+    require_role(user, "Admin")
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Brand name is required")
+    if db.query(Tenant).filter(Tenant.name == name).first() is not None:
+        raise HTTPException(status_code=400,
+                            detail="A brand with this name already exists")
+    slug = "".join(c.lower() if c.isalnum() else "-" for c in name).strip("-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    if not slug:
+        slug = "brand"
+    demo = []
+    for role_lower, role in [("admin", "Admin"), ("creator", "Creator"),
+                             ("manager", "Manager"), ("reviewer", "Reviewer")]:
+        username = f"{role_lower}-{slug}"
+        if db.query(User).filter(User.username == username).first() is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Demo username {username} is taken; pick another brand name")
+        demo.append((username, role))
+    tenant = Tenant(name=name)
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+    for username, role in demo:
+        db.add(User(username=username, password_hash=hash_password("demo123"),
+                    role=role, tenant_id=tenant.id))
+    db.commit()
+    audit(db, tenant.id, user.id, "create", "tenant", tenant.id, name)
+    db.commit()
+    return {"id": tenant.id, "name": tenant.name,
+            "demo_users": [{"username": u, "role": r} for u, r in demo]}
+
+
+@app.get("/tenants/{tenant_id}/custom-rules")
+def list_custom_rules(tenant_id: int, user: User = Depends(get_current_user),
+                      db: Session = Depends(get_db)):
+    if tenant_id != user.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    rules = db.query(CustomRule).filter(CustomRule.tenant_id == tenant_id).order_by(
+        CustomRule.rule_code, CustomRule.id).all()
+    return [{"id": r.id, "tenant_id": r.tenant_id, "rule_code": r.rule_code,
+             "version": r.version, "kind": r.kind, "params": r.params or {},
+             "text": r.text} for r in rules]
+
+
+@app.post("/tenants/{tenant_id}/custom-rules")
+def create_custom_rule(tenant_id: int, payload: CustomRuleBody,
+                       user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    if tenant_id != user.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    require_role(user, "Admin")
+    code = (payload.rule_code or "").strip()
+    kind = (payload.kind or "").strip()
+    text = (payload.text or "").strip()
+    params = payload.params or {}
+    if not code or not text:
+        raise HTTPException(status_code=400, detail="rule_code and text are required")
+    if kind == "forbidden_words":
+        if not isinstance(params.get("words"), list) or not params["words"]:
+            raise HTTPException(
+                status_code=400,
+                detail="forbidden_words needs params.words (non-empty list)")
+    elif kind == "fact_year":
+        try:
+            int(params.get("year"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400,
+                                detail="fact_year needs params.year (integer)")
+    elif kind == "palette":
+        if not params.get("hex"):
+            raise HTTPException(status_code=400, detail="palette needs params.hex")
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="kind must be forbidden_words, fact_year or palette")
+    existing = db.query(CustomRule).filter(CustomRule.tenant_id == tenant_id,
+                                           CustomRule.rule_code == code).all()
+    version = (payload.version or "").strip()
+    if version:
+        if any(r.version == version for r in existing):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Version {version} already exists for {code}")
+    else:
+        nums = []
+        for r in existing:
+            if r.version.startswith("v") and r.version[1:].isdigit():
+                nums.append(int(r.version[1:]))
+        version = f"v{max(nums) + 1}" if nums else "v1"
+    row = CustomRule(tenant_id=tenant_id, rule_code=code, version=version,
+                     kind=kind, params=params, text=text)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    audit(db, tenant_id, user.id, "create", "custom_rule", row.id, f"{code} {version}")
+    db.commit()
+    return {"id": row.id, "tenant_id": row.tenant_id, "rule_code": row.rule_code,
+            "version": row.version, "kind": row.kind, "params": row.params or {},
+            "text": row.text}
 
 
 # ---------- drafts ----------
@@ -264,8 +387,17 @@ def get_draft(draft_id: int, user: User = Depends(get_current_user),
 def review_draft(draft_id: int, user: User = Depends(get_current_user),
                  db: Session = Depends(get_db)):
     draft = get_draft_for_user(db, draft_id, user)
-    findings, needs_human_review, note = run_pipeline(draft.body, draft.content_type,
-                                                      draft.meta or {})
+    tenant = db.query(Tenant).filter(Tenant.id == draft.tenant_id).first()
+    # Latest custom rule per code (highest id wins) for this tenant.
+    latest: dict[str, CustomRule] = {}
+    for r in db.query(CustomRule).filter(
+            CustomRule.tenant_id == draft.tenant_id).order_by(CustomRule.id).all():
+        latest[r.rule_code] = r
+    custom = [{"rule_code": r.rule_code, "version": r.version, "kind": r.kind,
+               "params": r.params or {}, "text": r.text} for r in latest.values()]
+    findings, needs_human_review, note = run_pipeline(
+        draft.body, draft.content_type, draft.meta or {},
+        custom_rules=custom, tenant_name=tenant.name if tenant else None)
     # Re-review replaces prior findings for this draft.
     db.query(Finding).filter(Finding.draft_id == draft.id).delete()
     stored = []
@@ -409,6 +541,25 @@ def publish_draft(draft_id: int, user: User = Depends(get_current_user),
 
 
 # ---------- insights ----------
+# Deterministic rewrite suggestions (templates, not generated text): one
+# per rule family, offered when a rule looks unclear from real findings.
+_REWRITE_TEMPLATES = {
+    "BR-TONE": "Add one allowed-phrase example to this rule, so writers can see what good looks like.",
+    "BR-CLAIM": "List the approved sources a claim may cite, so writers know what evidence counts.",
+    "BR-TERM": "Show one correct and one incorrect example of the term.",
+    "BR-FACT": "Keep the fact in one place and quote it exactly, so writers copy it instead of recalling it.",
+    "BR-VIS": "Attach the approved asset (colour swatch, logo file) to this rule.",
+    "BR-ACC": "Add a pass/fail example — good alt text versus missing alt text.",
+}
+
+
+def _rewrite_suggestion(rule_code: str) -> str:
+    for prefix, text in _REWRITE_TEMPLATES.items():
+        if rule_code.startswith(prefix):
+            return text
+    return "Add a concrete example of a passing draft to this rule."
+
+
 @app.get("/insights")
 def insights(tenant_id: int | None = None, user: User = Depends(get_current_user),
              db: Session = Depends(get_db)):
@@ -425,8 +576,34 @@ def insights(tenant_id: int | None = None, user: User = Depends(get_current_user
     per_status: dict[str, int] = {}
     for d in drafts:
         per_status[d.status] = per_status.get(d.status, 0) + 1
+    # Most repeated mistake: the rule with the most findings.
+    most_repeated = None
+    if per_rule:
+        top_code = sorted(per_rule.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+        most_repeated = {"rule_code": top_code, "count": per_rule[top_code],
+                         "rule_text": RULE_TEXTS.get(top_code, "")}
+    # Least clear rule: highest rejected share among rules with >= 2
+    # findings. A rule writers keep pushing back on is the one to rewrite.
+    totals: dict[str, int] = {}
+    rejected: dict[str, int] = {}
+    for f in findings:
+        totals[f.rule_code] = totals.get(f.rule_code, 0) + 1
+        if f.status == "rejected":
+            rejected[f.rule_code] = rejected.get(f.rule_code, 0) + 1
+    least_clear = None
+    candidates = [(code, rejected.get(code, 0) / total, total)
+                  for code, total in totals.items() if total >= 2]
+    if candidates:
+        code, rate, total = sorted(
+            candidates, key=lambda c: (-c[1], -c[2], c[0]))[0]
+        least_clear = {"rule_code": code, "rejected": rejected.get(code, 0),
+                       "total": total, "rejection_rate": round(rate, 2),
+                       "rule_text": RULE_TEXTS.get(code, ""),
+                       "suggested_rewrite": _rewrite_suggestion(code)}
     return {"tenant_id": tid, "findings_per_rule": per_rule,
-            "drafts_per_status": per_status}
+            "drafts_per_status": per_status,
+            "most_repeated_mistake": most_repeated,
+            "least_clear_rule": least_clear}
 
 
 # ---------- demo repair (observable) ----------
