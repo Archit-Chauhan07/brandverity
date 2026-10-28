@@ -83,6 +83,37 @@ except Exception as _seed_exc:
     print(f"Demo seed skipped: {_seed_exc}")
 
 
+# Demo account repair: the seed above only runs when no tenant exists, so
+# a partial seed (tenant created, users missing or with a wrong password
+# hash) would leave the demo logins broken forever. On every import, make
+# sure the 4 public demo accounts exist with the documented demo password.
+# This only touches the 4 demo usernames; it never changes real users, and
+# it is a no-op when the accounts are already correct.
+try:
+    _repair_db = SessionLocal()
+    try:
+        _tenant = _repair_db.query(Tenant).filter(
+            Tenant.name == "Northpeak Coffee").first()
+        if _tenant is not None:
+            _want_hash = hash_password("demo123")
+            for _username, _role in [("admin", "Admin"), ("creator", "Creator"),
+                                     ("manager", "Manager"),
+                                     ("reviewer", "Reviewer")]:
+                _user = _repair_db.query(User).filter(
+                    User.username == _username).first()
+                if _user is None:
+                    _repair_db.add(User(username=_username,
+                                        password_hash=_want_hash,
+                                        role=_role, tenant_id=_tenant.id))
+                elif _user.password_hash != _want_hash:
+                    _user.password_hash = _want_hash
+            _repair_db.commit()
+    finally:
+        _repair_db.close()
+except Exception as _repair_exc:
+    print(f"Demo account repair skipped: {_repair_exc}")
+
+
 def get_current_user(authorization: str | None = Header(default=None),
                      db: Session = Depends(get_db)) -> User:
     if not authorization or not authorization.startswith("Bearer "):
