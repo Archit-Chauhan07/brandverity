@@ -42,14 +42,47 @@ export default function InsightsPage() {
     <>
       <h1>Insights</h1>
       <p className="banner">
-        Day 1 placeholder dashboard — real counts from{" "}
-        <code>GET /insights</code>, rendered as plain lists and bars. No
-        charts library yet.
+        Real counts and patterns from <code>GET /insights</code>, computed
+        from your drafts&apos; actual findings — no charts library, just the
+        numbers.
       </p>
       {error && <p className="error">{error}</p>}
       {!insights && !error && <p className="muted">Loading…</p>}
       {insights && (
         <>
+          <section className="card">
+            <h2>Most repeated mistake</h2>
+            {insights.most_repeated_mistake ? (
+              <p>
+                <strong>{insights.most_repeated_mistake.rule_code}</strong> —{" "}
+                {insights.most_repeated_mistake.count} findings.{" "}
+                {insights.most_repeated_mistake.rule_text}
+              </p>
+            ) : (
+              <p className="muted">No findings yet.</p>
+            )}
+          </section>
+          <section className="card">
+            <h2>Least clear rule</h2>
+            {insights.least_clear_rule ? (
+              <p>
+                <strong>{insights.least_clear_rule.rule_code}</strong> —{" "}
+                {insights.least_clear_rule.rejected} of{" "}
+                {insights.least_clear_rule.total} findings rejected (
+                {Math.round(insights.least_clear_rule.rejection_rate * 100)}
+                %). {insights.least_clear_rule.rule_text}
+                <br />
+                <em>
+                  Suggested rewrite:{" "}
+                  {insights.least_clear_rule.suggested_rewrite}
+                </em>
+              </p>
+            ) : (
+              <p className="muted">
+                Not enough data yet — needs a rule with at least 2 findings.
+              </p>
+            )}
+          </section>
           <section className="card">
             <h2>Findings per rule</h2>
             {/* Real backend key is findings_per_rule; the brief said
