@@ -23,15 +23,16 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="BrandVerity")
 
 # CORS: the frontend calls this API from another origin (localhost:3000
-# locally, the deployed frontend URL in production). Without this, the
+# locally, any *.vercel.app deployment in production). Without this, the
 # browser blocks those calls even though direct API tests pass.
+# allow_origin_regex covers any Vercel deployment URL, so no code change
+# is needed once the frontend address is known.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        # Add the deployed frontend URL here once it exists, e.g.
-        # "https://brandverity.vercel.app",
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
