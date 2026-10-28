@@ -63,6 +63,15 @@ export const api = {
     }),
   listTenants: () => apiFetch("/tenants"),
   listRules: (tenantId) => apiFetch(`/tenants/${tenantId}/rules`),
+  createTenant: (name) =>
+    apiFetch("/tenants", { method: "POST", body: JSON.stringify({ name }) }),
+  listCustomRules: (tenantId) =>
+    apiFetch(`/tenants/${tenantId}/custom-rules`),
+  createCustomRule: (tenantId, payload) =>
+    apiFetch(`/tenants/${tenantId}/custom-rules`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   createDraft: (payload) =>
     apiFetch("/drafts", { method: "POST", body: JSON.stringify(payload) }),
   listDrafts: (status) =>
