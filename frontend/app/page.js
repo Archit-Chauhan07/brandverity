@@ -68,6 +68,11 @@ export default function Home() {
         Demo logins (password <code>demo123</code>): admin / Admin, creator /
         Creator, manager / Manager, reviewer / Reviewer.
       </p>
+      <p className="muted">
+        Want your own workspace instead of the demo?{" "}
+        <Link href="/signup">Sign up</Link> — verify your email and you get
+        your own brand, with you as Admin.
+      </p>
     </>
   );
 }
