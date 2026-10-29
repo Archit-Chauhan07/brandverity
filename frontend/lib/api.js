@@ -61,6 +61,31 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+  register: (payload) =>
+    apiFetch("/auth/register", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  verifyEmail: (token) =>
+    apiFetch("/auth/verify-email", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  resendVerification: (email) =>
+    apiFetch("/auth/resend-verification", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  forgotPassword: (email) =>
+    apiFetch("/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  resetPassword: (token, new_password) =>
+    apiFetch("/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, new_password }),
+    }),
   listTenants: () => apiFetch("/tenants"),
   listRules: (tenantId) => apiFetch(`/tenants/${tenantId}/rules`),
   createTenant: (name) =>
