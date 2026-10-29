@@ -25,6 +25,25 @@ class User(Base):
     tenant = relationship("Tenant", back_populates="users")
 
 
+class UserEmail(Base):
+    """Email identity for a genuinely registered user. A NEW table, so
+    create_all creates it automatically on existing databases — no
+    migration step. Demo users have no row here and log in exactly as
+    before; a row with verified=0 blocks login until the emailed link
+    is clicked. Tokens are stored hashed; expiry is an ISO timestamp
+    string (portable across SQLite and Postgres)."""
+    __tablename__ = "user_emails"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False,
+                     unique=True, index=True)
+    email = Column(String, unique=True, nullable=False, index=True)
+    verified = Column(Integer, nullable=False, default=0)  # 0 | 1
+    verify_token_hash = Column(String, nullable=True)
+    verify_expires = Column(String, nullable=True)
+    reset_token_hash = Column(String, nullable=True)
+    reset_expires = Column(String, nullable=True)
+
+
 class Rule(Base):
     __tablename__ = "rules"
     id = Column(Integer, primary_key=True, index=True)
