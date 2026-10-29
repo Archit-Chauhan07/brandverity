@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api, saveSession } from "../../lib/api";
@@ -30,10 +31,18 @@ export default function LoginPage() {
   return (
     <>
       <h1>Log in</h1>
-      <p className="muted">Demo tenant: Northpeak Coffee. Use a demo account below.</p>
+      <p className="muted">
+        Use your username or email. Demo tenant: Northpeak Coffee — use a
+        demo account below, or <Link href="/signup">create your own account</Link>.
+      </p>
       {error && <p className="error">{error}</p>}
+      {error.includes("verify your email") && (
+        <p className="muted">
+          <Link href="/verify">Request a new verification link</Link>
+        </p>
+      )}
       <form onSubmit={onSubmit} className="card">
-        <label htmlFor="username">Username</label>
+        <label htmlFor="username">Username or email</label>
         <input
           id="username"
           type="text"
@@ -59,6 +68,10 @@ export default function LoginPage() {
         Demo logins (password <code>demo123</code>): <code>admin</code> (Admin),{" "}
         <code>creator</code> (Creator), <code>manager</code> (Manager),{" "}
         <code>reviewer</code> (Reviewer).
+      </p>
+      <p className="muted">
+        New here? <Link href="/signup">Sign up</Link> ·{" "}
+        <Link href="/forgot-password">Forgot password?</Link>
       </p>
     </>
   );
