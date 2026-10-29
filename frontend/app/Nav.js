@@ -35,7 +35,10 @@ export default function Nav() {
           <button onClick={logout}>Log out</button>
         </>
       ) : (
-        <Link href="/login">Log in</Link>
+        <>
+          <Link href="/login">Log in</Link>
+          <Link href="/signup">Sign up</Link>
+        </>
       )}
     </nav>
   );
