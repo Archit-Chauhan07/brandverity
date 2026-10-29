@@ -6,7 +6,9 @@ Nothing auto-publishes: only POST /drafts/{id}/publish (Admin) sets
 status "published"; every other transition is listed explicitly below.
 """
 import hashlib
+import re
 import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,8 +17,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
+from .mailer import (app_url, send_reset_email, send_verification_email)
 from .models import (Approval, AuditLog, Comment, CustomRule, Draft, Finding,
-                     Rule, Tenant, User)
+                     Rule, Tenant, User, UserEmail)
 from .pipeline import RULE_TEXTS, run_pipeline
 
 Base.metadata.create_all(bind=engine)
@@ -44,11 +47,52 @@ TOKENS: dict[str, int] = {}
 
 
 def hash_password(password: str) -> str:
+    """Legacy demo scheme (deterministic SHA-256). Still used for the
+    public demo accounts, which the repair block below keeps on it."""
     return hashlib.sha256(f"brandverity:{password}".encode()).hexdigest()
 
 
+def hash_password_new(password: str) -> str:
+    """Genuine scheme for registered users: salted PBKDF2-HMAC-SHA256,
+    stdlib only (no new dependency). Format:
+    pbkdf2$<iterations>$<salt hex>$<hash hex>."""
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(),
+                             200_000)
+    return f"pbkdf2$200000${salt}${dk.hex()}"
+
+
 def verify_password(password: str, password_hash: str) -> bool:
+    """Scheme-aware: new pbkdf2 hashes verify by their own format, old
+    demo hashes verify exactly as before. Demo logins are untouched."""
+    if password_hash.startswith("pbkdf2$"):
+        try:
+            _, iters, salt, want = password_hash.split("$")
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode(),
+                                     salt.encode(), int(iters))
+            return secrets.compare_digest(dk.hex(), want)
+        except Exception:
+            return False
     return hash_password(password) == password_hash
+
+
+def _token_hash(token: str) -> str:
+    """Tokens are stored hashed, so a database read alone never yields a
+    usable verification or reset link."""
+    return hashlib.sha256(f"brandverity-token:{token}".encode()).hexdigest()
+
+
+def _expiry(hours: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+
+def _expired(iso: str | None) -> bool:
+    if not iso:
+        return True
+    try:
+        return datetime.now(timezone.utc) > datetime.fromisoformat(iso)
+    except Exception:
+        return True
 
 
 # Demo seeding for hosts with no manual seed step (e.g. serverless):
@@ -178,6 +222,26 @@ class LoginBody(BaseModel):
     password: str
 
 
+class RegisterBody(BaseModel):
+    username: str = ""
+    email: str = ""
+    password: str = ""
+    brand_name: str = ""
+
+
+class TokenBody(BaseModel):
+    token: str = ""
+
+
+class EmailBody(BaseModel):
+    email: str = ""
+
+
+class ResetBody(BaseModel):
+    token: str = ""
+    new_password: str = ""
+
+
 class DraftBody(BaseModel):
     title: str = ""
     body: str = ""
@@ -209,9 +273,23 @@ class CustomRuleBody(BaseModel):
 # ---------- auth ----------
 @app.post("/auth/login")
 def login(payload: LoginBody, db: Session = Depends(get_db)):
+    # Login accepts a username OR an email address.
     user = db.query(User).filter(User.username == payload.username).first()
+    if user is None:
+        row = db.query(UserEmail).filter(
+            UserEmail.email == payload.username.strip().lower()).first()
+        if row is not None:
+            user = db.query(User).filter(User.id == row.user_id).first()
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    # Genuine accounts must verify their email first. Demo accounts have
+    # no UserEmail row, so this gate never touches them.
+    row = db.query(UserEmail).filter(UserEmail.user_id == user.id).first()
+    if row is not None and not row.verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Please verify your email before logging in. "
+                   "Check your inbox for the verification link, or request a new one.")
     token = secrets.token_hex(32)
     TOKENS[token] = user.id
     audit(db, user.tenant_id, user.id, "login", "user", user.id, f"login {user.username}")
@@ -219,6 +297,141 @@ def login(payload: LoginBody, db: Session = Depends(get_db)):
     return {"token": token,
             "user": {"id": user.id, "username": user.username, "role": user.role,
                      "tenant_id": user.tenant_id}}
+
+
+_DEMO_USERNAMES = {"admin", "creator", "manager", "reviewer"}
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+
+
+@app.post("/auth/register")
+def register(payload: RegisterBody, db: Session = Depends(get_db)):
+    """Genuine signup: creates a personal brand tenant where the new user
+    is Admin, plus an unverified email identity. The account cannot log
+    in until the emailed verification link is clicked."""
+    username = (payload.username or "").strip()
+    email = (payload.email or "").strip().lower()
+    password = payload.password or ""
+    brand = (payload.brand_name or "").strip()
+    if not _USERNAME_RE.match(username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be 3-32 letters, digits, _ or -")
+    if username in _DEMO_USERNAMES:
+        raise HTTPException(
+            status_code=400, detail="That username is reserved for demo accounts")
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters")
+    if not brand:
+        raise HTTPException(status_code=400, detail="Brand name is required")
+    if db.query(User).filter(User.username == username).first() is not None:
+        raise HTTPException(status_code=400, detail="That username is taken")
+    if db.query(UserEmail).filter(UserEmail.email == email).first() is not None:
+        raise HTTPException(status_code=400, detail="That email is already registered")
+    if db.query(Tenant).filter(Tenant.name == brand).first() is not None:
+        raise HTTPException(status_code=400,
+                            detail="A brand with this name already exists")
+    tenant = Tenant(name=brand)
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+    user = User(username=username, password_hash=hash_password_new(password),
+                role="Admin", tenant_id=tenant.id)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    token = secrets.token_urlsafe(32)
+    db.add(UserEmail(user_id=user.id, email=email, verified=0,
+                     verify_token_hash=_token_hash(token),
+                     verify_expires=_expiry(24)))
+    audit(db, tenant.id, user.id, "register", "user", user.id, username)
+    db.commit()
+    link = f"{app_url()}/verify?token={token}"
+    sent = send_verification_email(email, link)
+    return {"ok": True, "email_sent": sent,
+            "message": ("Check your email for the verification link."
+                        if sent else
+                        "Account created, but the verification email could not "
+                        "be sent yet — use the resend link on the verify page.")}
+
+
+@app.post("/auth/verify-email")
+def verify_email(payload: TokenBody, db: Session = Depends(get_db)):
+    row = db.query(UserEmail).filter(
+        UserEmail.verify_token_hash == _token_hash(payload.token or "")).first()
+    if row is None or _expired(row.verify_expires):
+        raise HTTPException(
+            status_code=400, detail="This link is invalid or expired")
+    row.verified = 1
+    row.verify_token_hash = None
+    row.verify_expires = None
+    audit(db, _user_tenant(db, row.user_id), row.user_id,
+          "verify_email", "user", row.user_id, row.email)
+    db.commit()
+    return {"ok": True, "message": "Email verified — you can now log in."}
+
+
+def _user_tenant(db: Session, user_id: int) -> int:
+    user = db.query(User).filter(User.id == user_id).first()
+    return user.tenant_id if user else 0
+
+
+@app.post("/auth/resend-verification")
+def resend_verification(payload: EmailBody, db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    row = db.query(UserEmail).filter(UserEmail.email == email).first()
+    if row is None or row.verified:
+        # Generic reply: never reveal whether an email is registered.
+        return {"ok": True,
+                "message": "If that email is registered and unverified, "
+                           "a new verification link is on its way."}
+    token = secrets.token_urlsafe(32)
+    row.verify_token_hash = _token_hash(token)
+    row.verify_expires = _expiry(24)
+    db.commit()
+    sent = send_verification_email(email, f"{app_url()}/verify?token={token}")
+    return {"ok": True, "email_sent": sent,
+            "message": "If that email is registered and unverified, "
+                       "a new verification link is on its way."}
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(payload: EmailBody, db: Session = Depends(get_db)):
+    email = (payload.email or "").strip().lower()
+    row = db.query(UserEmail).filter(UserEmail.email == email).first()
+    if row is not None:
+        token = secrets.token_urlsafe(32)
+        row.reset_token_hash = _token_hash(token)
+        row.reset_expires = _expiry(1)
+        db.commit()
+        send_reset_email(email, f"{app_url()}/reset-password?token={token}")
+    # Generic reply either way: never reveal whether an email is registered.
+    return {"ok": True,
+            "message": "If that email is registered, a password reset link "
+                       "is on its way."}
+
+
+@app.post("/auth/reset-password")
+def reset_password(payload: ResetBody, db: Session = Depends(get_db)):
+    if len(payload.new_password or "") < 8:
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters")
+    row = db.query(UserEmail).filter(
+        UserEmail.reset_token_hash == _token_hash(payload.token or "")).first()
+    if row is None or _expired(row.reset_expires):
+        raise HTTPException(
+            status_code=400, detail="This link is invalid or expired")
+    user = db.query(User).filter(User.id == row.user_id).first()
+    if user is None:
+        raise HTTPException(status_code=400, detail="This link is invalid")
+    user.password_hash = hash_password_new(payload.new_password)
+    row.reset_token_hash = None
+    row.reset_expires = None
+    audit(db, user.tenant_id, user.id, "reset_password", "user", user.id, "")
+    db.commit()
+    return {"ok": True, "message": "Password changed — you can now log in."}
 
 
 # ---------- tenants / rules ----------
