@@ -104,6 +104,11 @@ export const api = {
   getDraft: (id) => apiFetch(`/drafts/${id}`),
   reviewDraft: (id) =>
     apiFetch(`/drafts/${id}/review`, { method: "POST", body: JSON.stringify({}) }),
+  checkClaim: (id, claim) =>
+    apiFetch(`/drafts/${id}/claim-check`, {
+      method: "POST",
+      body: JSON.stringify({ claim }),
+    }),
   decideFinding: (draftId, findingId, decision) =>
     apiFetch(`/drafts/${draftId}/findings/${findingId}/decision`, {
       method: "POST",
