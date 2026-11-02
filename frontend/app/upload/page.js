@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, getUser } from "../../lib/api";
 
 export default function UploadPage() {
@@ -20,6 +20,9 @@ export default function UploadPage() {
   const [imagePreview, setImagePreview] = useState("");
   const [imageInfo, setImageInfo] = useState(null);
   const [colorMeasured, setColorMeasured] = useState(false);
+  const [ocrText, setOcrText] = useState("");
+  const [ocrStatus, setOcrStatus] = useState("idle");
+  const ocrRunRef = useRef(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [user, setUser] = useState(null);
@@ -74,6 +77,51 @@ export default function UploadPage() {
     return `#${h(r)}${h(g)}${h(b)}`.toUpperCase();
   }
 
+  // Read text out of the uploaded image in the browser (Phase 2 OCR).
+  // Runs on a canvas drawn from the same loaded image as the colour
+  // measurement below, so the image file itself never leaves the browser:
+  // only the extracted text is sent to the backend, where it is checked
+  // against term/fact rules exactly like body copy. If OCR fails, the
+  // draft can still be submitted — OCR checks are simply skipped, and
+  // the status says so honestly instead of claiming a clean image.
+  async function runOcr(img) {
+    const runId = ++ocrRunRef.current;
+    setOcrStatus("scanning");
+    setOcrText("");
+    let worker = null;
+    try {
+      const { createWorker } = await import("tesseract.js");
+      worker = await createWorker("eng");
+      // Cap the OCR canvas so large photos stay fast, without shrinking
+      // small images (which would hurt recognition).
+      const maxSide = 1600;
+      const scale = Math.min(
+        1,
+        maxSide / Math.max(img.naturalWidth, img.naturalHeight)
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      const { data } = await worker.recognize(canvas);
+      if (ocrRunRef.current !== runId) return;
+      setOcrText((data.text || "").trim().slice(0, 10000));
+      setOcrStatus("done");
+    } catch {
+      if (ocrRunRef.current !== runId) return;
+      setOcrText("");
+      setOcrStatus("failed");
+    } finally {
+      if (worker) {
+        try {
+          await worker.terminate();
+        } catch {
+          // Termination failure after recognition is not user-visible.
+        }
+      }
+    }
+  }
+
   // Measure the dominant color of the uploaded image file itself, in the
   // browser, and use it as the primary color the checker tests. The user
   // can still override it with the color picker afterwards.
@@ -83,6 +131,9 @@ export default function UploadPage() {
     setImageFile(file || null);
     setImageInfo(null);
     setColorMeasured(false);
+    ocrRunRef.current += 1;
+    setOcrText("");
+    setOcrStatus("idle");
     if (!file) {
       setImagePreview("");
       return;
@@ -147,6 +198,9 @@ export default function UploadPage() {
           dominant: hex,
         });
       }
+      // OCR runs from the same loaded image, after colour measurement,
+      // so it never blocks the colour result.
+      runOcr(img);
     };
     img.onerror = () => {
       setError(
@@ -179,6 +233,10 @@ export default function UploadPage() {
               color_source: colorMeasured
                 ? "measured from uploaded file"
                 : "entered manually",
+              // OCR text only: the image file itself is never uploaded.
+              ...(ocrStatus === "done" && ocrText
+                ? { ocr_text: ocrText, ocr_status: "done" }
+                : { ocr_status: ocrStatus }),
             }
           : {};
       const draft = await api.createDraft({
@@ -304,6 +362,23 @@ export default function UploadPage() {
                     · measured dominant color {imageInfo.dominant}
                   </p>
                 )}
+                {ocrStatus === "scanning" && (
+                  <p className="muted">Reading text from the image (OCR)…</p>
+                )}
+                {ocrStatus === "done" && (
+                  <p className="muted">
+                    {ocrText
+                      ? `Image text (OCR): ${ocrText.slice(0, 200)}${
+                          ocrText.length > 200 ? "…" : ""
+                        }`
+                      : "No readable text found in the image."}
+                  </p>
+                )}
+                {ocrStatus === "failed" && (
+                  <p className="muted">
+                    Could not read image text — OCR checks skipped.
+                  </p>
+                )}
               </div>
             )}
             <div className="row">
@@ -349,6 +424,10 @@ export default function UploadPage() {
               />
               Logo is distorted / stretched
             </label>
+            <p className="muted">
+              Logo matching is not built yet — this is a manual check only;
+              a distorted logo still fires BR-VIS-01.
+            </p>
             <label htmlFor="alt-text">Alt text</label>
             <input
               id="alt-text"
@@ -360,8 +439,15 @@ export default function UploadPage() {
           </fieldset>
         )}
 
-        <button type="submit" disabled={busy || !tenantId}>
-          {busy ? "Creating…" : "Create draft & run review"}
+        <button
+          type="submit"
+          disabled={busy || !tenantId || ocrStatus === "scanning"}
+        >
+          {ocrStatus === "scanning"
+            ? "Reading image text…"
+            : busy
+              ? "Creating…"
+              : "Create draft & run review"}
         </button>
       </form>
     </>
