@@ -76,6 +76,14 @@ def send_verification_email(to_email: str, link: str) -> bool:
     )
 
 
+def send_notification_email(to_email: str, subject: str, body: str) -> bool:
+    """Round 3 approval notifications, reusing the same Gmail SMTP setup
+    as verification/reset mail. Returns False (never raises) when SMTP
+    is not configured or sending fails, so the caller records the
+    attempt as unsent instead of pretending it went out."""
+    return send_email(to_email, subject, body)
+
+
 def send_reset_email(to_email: str, link: str) -> bool:
     return send_email(
         to_email,
