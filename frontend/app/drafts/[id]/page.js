@@ -13,6 +13,9 @@ export default function DraftPage({ params }) {
   const [user, setUser] = useState(null);
   const [comment, setComment] = useState("");
   const [workflowComment, setWorkflowComment] = useState("");
+  const [claimText, setClaimText] = useState("");
+  const [claimResult, setClaimResult] = useState(null);
+  const [claimBusy, setClaimBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [needsHumanReview, setNeedsHumanReview] = useState(null);
 
@@ -190,6 +193,70 @@ export default function DraftPage({ params }) {
             </button>
           </article>
         ))}
+      </section>
+
+      <section className="card">
+        <h2>Claim check — retrieval only</h2>
+        <p className="muted">
+          Paste a claim from this draft. This only surfaces rules from
+          this brand&apos;s own library whose wording overlaps the claim —
+          it is not a generative AI verdict, it creates no finding, and
+          it does not change this draft. A human reviewer still decides.
+        </p>
+        <label htmlFor="claim-text">Claim to check</label>
+        <textarea
+          id="claim-text"
+          value={claimText}
+          onChange={(e) => setClaimText(e.target.value)}
+          placeholder="e.g. Our single-origin blend comes from three regions."
+          style={{ minHeight: 80 }}
+        />
+        <button
+          disabled={claimBusy || !claimText.trim()}
+          onClick={async () => {
+            setError("");
+            setClaimBusy(true);
+            try {
+              const res = await api.checkClaim(id, claimText);
+              setClaimResult(res);
+            } catch (err) {
+              setError(err.message);
+            } finally {
+              setClaimBusy(false);
+            }
+          }}
+        >
+          Check claim
+        </button>
+        {claimResult && (
+          <>
+            <p className={claimResult.result === "abstain" ? "banner" : ""}>
+              {claimResult.message}
+            </p>
+            {claimResult.rules && claimResult.rules.length > 0 && (
+              <>
+                {claimResult.rules.map((r) => (
+                  <article key={r.rule_code} className="card">
+                    <p>
+                      <strong>
+                        {r.rule_code} {r.rule_version}
+                      </strong>
+                    </p>
+                    <p>{r.text}</p>
+                    <p className="muted">
+                      Matched words: {r.matched_keywords.join(", ")}
+                      {r.matched_span ? ` · in claim: “${r.matched_span}”` : ""}
+                    </p>
+                  </article>
+                ))}
+                <p className="muted">
+                  These are candidates for a human to judge — no finding
+                  was created by this check.
+                </p>
+              </>
+            )}
+          </>
+        )}
       </section>
 
       <section className="card">
