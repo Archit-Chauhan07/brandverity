@@ -21,6 +21,7 @@ from .mailer import (app_url, mail_configured, send_notification_email,
                      send_reset_email, send_verification_email)
 from .models import (Approval, AuditLog, Comment, CustomRule, Draft, Finding,
                      Notification, Rule, Tenant, User, UserEmail)
+from .claim_check import build_library, retrieve_claim_rules
 from .pipeline import RULE_TEXTS, run_pipeline
 
 Base.metadata.create_all(bind=engine)
@@ -373,6 +374,10 @@ class DraftBody(BaseModel):
     body: str = ""
     content_type: str = "text"
     meta: dict | None = None
+
+
+class ClaimCheckBody(BaseModel):
+    claim: str = ""
 
 
 class CommentBody(BaseModel):
@@ -757,6 +762,38 @@ def review_draft(draft_id: int, user: User = Depends(get_current_user),
                           "rule_version": r.rule_version, "quoted_span": r.quoted_span,
                           "why": r.why, "suggested_edit": r.suggested_edit,
                           "status": r.status} for r in stored]}
+
+
+@app.post("/drafts/{draft_id}/claim-check")
+def claim_check(draft_id: int, payload: ClaimCheckBody,
+                user: User = Depends(get_current_user),
+                db: Session = Depends(get_db)):
+    """Retrieval-only claim check (Round 3, Phase 3).
+
+    Read-only: it retrieves rules from THIS draft's tenant library
+    only, by keyword overlap, and returns them (or an abstain). It
+    creates no finding, changes no draft text or status, and makes no
+    approval or publish decision — a human reviewer still decides.
+    It is not a generative AI verdict and uses no external AI provider
+    or key. Tenant isolation comes from get_draft_for_user: another
+    brand's draft is a 404, so its library can never be surfaced."""
+    draft = get_draft_for_user(db, draft_id, user)
+    rule_rows = db.query(Rule).filter(Rule.tenant_id == draft.tenant_id).all()
+    custom_rows = db.query(CustomRule).filter(
+        CustomRule.tenant_id == draft.tenant_id).all()
+    library = build_library(rule_rows, custom_rows)
+    result = retrieve_claim_rules(payload.claim or "", library)
+    return {
+        "draft_id": draft.id,
+        "claim": payload.claim or "",
+        "method": ("retrieval-only: keyword overlap over this brand's "
+                   "library only. No external AI, no generated verdict."),
+        "result": result["result"],
+        "rules": result["rules"],
+        "message": result["message"],
+        "finding_created": False,
+        "draft_changed": False,
+    }
 
 
 @app.post("/drafts/{draft_id}/findings/{finding_id}/decision")
