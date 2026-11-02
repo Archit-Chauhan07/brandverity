@@ -17,12 +17,36 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
-from .mailer import (app_url, send_reset_email, send_verification_email)
+from .mailer import (app_url, mail_configured, send_notification_email,
+                     send_reset_email, send_verification_email)
 from .models import (Approval, AuditLog, Comment, CustomRule, Draft, Finding,
-                     Rule, Tenant, User, UserEmail)
+                     Notification, Rule, Tenant, User, UserEmail)
 from .pipeline import RULE_TEXTS, run_pipeline
 
 Base.metadata.create_all(bind=engine)
+
+# Round 3: create_all creates NEW tables only — it never adds a column
+# to an existing table. AuditLog.created_at is new, so an existing
+# database (e.g. the live one) would otherwise keep inserting without
+# it. Add the column on startup if it is missing, in the same
+# import-time-repair spirit as the demo-account repair below; a failure
+# is printed and never crashes the app.
+try:
+    from sqlalchemy import inspect as _sa_inspect, text as _sa_text
+    _insp = _sa_inspect(engine)
+    if _insp.has_table("audit_logs"):
+        _cols = [c["name"] for c in _insp.get_columns("audit_logs")]
+        if "created_at" not in _cols:
+            if engine.dialect.name == "postgresql":
+                _ddl = ("ALTER TABLE audit_logs "
+                        "ADD COLUMN IF NOT EXISTS created_at TEXT")
+            else:
+                _ddl = "ALTER TABLE audit_logs ADD COLUMN created_at TEXT"
+            with engine.begin() as _conn:
+                _conn.execute(_sa_text(_ddl))
+            print("Audit timestamp column added to audit_logs.")
+except Exception as _audit_col_exc:
+    print(f"Audit timestamp column check skipped: {_audit_col_exc}")
 
 app = FastAPI(title="BrandVerity")
 
@@ -178,10 +202,112 @@ def require_role(user: User, *roles: str):
         raise HTTPException(status_code=403, detail=f"Requires role: {'/'.join(roles)}")
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def audit(db: Session, tenant_id: int, actor_id, action: str, entity: str,
           entity_id, detail: str = ""):
+    # Round 3: every new audit row carries its timestamp. Rows written
+    # before this column existed keep created_at NULL (unknown time).
     db.add(AuditLog(tenant_id=tenant_id, actor_id=actor_id, action=action,
-                    entity=entity, entity_id=entity_id, detail=detail))
+                    entity=entity, entity_id=entity_id, detail=detail,
+                    created_at=_now_iso()))
+
+
+def _audit_out(db: Session, log: AuditLog) -> dict:
+    """One audit row as the export shows it: who (username, not just
+    id), what, when (null = written before Round 3, time unknown),
+    plus the decision and the rule version where this row concerns a
+    specific finding — and null there otherwise, never invented."""
+    actor = db.query(User).filter(User.id == log.actor_id).first() \
+        if log.actor_id else None
+    decision = None
+    rule_code = None
+    rule_version = None
+    finding_status = None
+    if log.action == "finding_decision" and log.entity == "finding":
+        decision = log.detail or None
+        finding = db.query(Finding).filter(Finding.id == log.entity_id).first()
+        if finding is not None:
+            rule_code = finding.rule_code
+            rule_version = finding.rule_version
+            finding_status = finding.status
+    elif log.action.startswith("transition:"):
+        # e.g. transition:draft->pending_manager — the decision is the
+        # status the draft moved TO. Draft transitions cite no single
+        # rule, so rule_code/rule_version stay null for these rows.
+        decision = log.action.split("->", 1)[1] if "->" in log.action else None
+    return {"id": log.id, "actor_id": log.actor_id,
+            "actor": actor.username if actor else None,
+            "action": log.action, "entity": log.entity,
+            "entity_id": log.entity_id, "detail": log.detail,
+            "created_at": log.created_at, "decision": decision,
+            "rule_code": rule_code, "rule_version": rule_version,
+            "finding_status": finding_status}
+
+
+def _notify(db: Session, draft: Draft, actor: User, to_status: str):
+    """Round 3 email-first notifications for a draft state change.
+
+    Recipients are the next role in creator -> manager -> reviewer
+    (plus the draft creator on a decision), all from this draft's own
+    tenant — never another brand. Each attempt is recorded in the
+    notifications table with its true outcome: "sent" only when
+    mailer.send_email returned True, otherwise "unsent" with the
+    reason. No SMTP config means no network attempt at all, just an
+    unsent record. Sending a notification never changes the draft
+    transition itself and never auto-publishes anything."""
+    if to_status == "pending_manager":
+        roles, kind = ["Manager"], "action_needed"
+        creator_also = False
+    elif to_status == "pending_reviewer":
+        roles, kind = ["Reviewer"], "action_needed"
+        creator_also = False
+    elif to_status == "approved":
+        roles, kind = ["Admin"], "decision"
+        creator_also = True
+    elif to_status == "draft":
+        roles, kind = [], "decision"  # rejected: back to the creator
+        creator_also = True
+    elif to_status == "published":
+        roles, kind = [], "decision"
+        creator_also = True
+    else:
+        return
+    recipients: dict[int, User] = {}
+    for role in roles:
+        for u in db.query(User).filter(User.tenant_id == draft.tenant_id,
+                                       User.role == role).all():
+            recipients[u.id] = u
+    if creator_also and draft.creator_id and draft.creator_id != actor.id:
+        creator = db.query(User).filter(User.id == draft.creator_id).first()
+        if creator is not None:
+            recipients[creator.id] = creator
+    for recipient in recipients.values():
+        if recipient.id == actor.id:
+            continue
+        row = db.query(UserEmail).filter(
+            UserEmail.user_id == recipient.id).first()
+        email = row.email if row is not None and row.verified == 1 else None
+        if not mail_configured():
+            status, reason = "unsent", "SMTP not configured"
+        elif email is None:
+            status, reason = "unsent", "no verified email on file"
+        else:
+            sent = send_notification_email(
+                email,
+                f"BrandVerity: '{draft.title or 'Untitled'}' needs your action"
+                if kind == "action_needed" else
+                f"BrandVerity: decision on '{draft.title or 'Untitled'}'",
+                f"Draft '{draft.title or 'Untitled'}' is now {to_status}.\n\n"
+                f"Open BrandVerity and check the approval queue.\n")
+            status, reason = ("sent", "") if sent else ("unsent", "send failed")
+        db.add(Notification(tenant_id=draft.tenant_id,
+                            recipient_id=recipient.id,
+                            recipient_role=recipient.role,
+                            draft_id=draft.id, kind=kind, status=status,
+                            reason=reason, created_at=_now_iso()))
 
 
 def get_draft_for_user(db: Session, draft_id: int, user: User) -> Draft:
@@ -212,7 +338,7 @@ def draft_out(draft: Draft, db: Session) -> dict:
         "comments": [{"id": c.id, "draft_id": c.draft_id, "author_id": c.author_id,
                       "text": c.text} for c in comments],
         "history": [{"id": l.id, "action": l.action, "actor_id": l.actor_id,
-                     "detail": l.detail} for l in logs],
+                     "detail": l.detail, "created_at": l.created_at} for l in logs],
     }
 
 
@@ -663,6 +789,10 @@ def _transition(db: Session, draft: Draft, user: User, to_status: str, comment: 
         db.add(Comment(draft_id=draft.id, author_id=user.id, text=comment))
     audit(db, user.tenant_id, user.id, f"transition:{from_status}->{to_status}",
           "draft", draft.id, comment or "")
+    # Round 3: notify the next role / the creator by email. A failed or
+    # unconfigured notification is recorded unsent; it never blocks
+    # or changes this transition.
+    _notify(db, draft, user, to_status)
     db.commit()
     db.refresh(draft)
     return draft_out(draft, db)
@@ -732,12 +862,61 @@ def draft_history(draft_id: int, user: User = Depends(get_current_user),
     approvals = db.query(Approval).filter(Approval.draft_id == draft.id).all()
     logs = db.query(AuditLog).filter(AuditLog.entity == "draft",
                                      AuditLog.entity_id == draft.id).all()
+    notes = db.query(Notification).filter(
+        Notification.draft_id == draft.id).order_by(Notification.id).all()
     return {
         "draft_id": draft.id, "status": draft.status,
         "approvals": [{"id": a.id, "from_status": a.from_status, "to_status": a.to_status,
                        "actor_id": a.actor_id, "comment": a.comment} for a in approvals],
         "audit": [{"id": l.id, "action": l.action, "actor_id": l.actor_id,
-                   "detail": l.detail} for l in logs],
+                   "detail": l.detail, "created_at": l.created_at} for l in logs],
+        # Round 3: the honest record of notification attempts for this
+        # draft — "sent" only when mail actually went out.
+        "notifications": [{"id": n.id, "recipient_id": n.recipient_id,
+                           "recipient_role": n.recipient_role, "kind": n.kind,
+                           "status": n.status, "reason": n.reason,
+                           "created_at": n.created_at} for n in notes],
+    }
+
+
+@app.get("/tenants/{tenant_id}/audit-export")
+def audit_export(tenant_id: int, user: User = Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    """Round 3 per-brand audit export (JSON). Tenant-scoped: a user can
+    only export their own brand's rows, never another brand's.
+
+    Each row shows who did what, when, under which rule version, and
+    what decision was made — where that information exists. Rows
+    written before Round 3 have created_at null (time unknown, never
+    backfilled), and rows that concern no single finding have
+    rule_code/rule_version null. The response says both plainly."""
+    if tenant_id != user.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    logs = db.query(AuditLog).filter(
+        AuditLog.tenant_id == tenant_id).order_by(AuditLog.id).all()
+    rows = [_audit_out(db, l) for l in logs]
+    notes = db.query(Notification).filter(
+        Notification.tenant_id == tenant_id).order_by(Notification.id).all()
+    users = {u.id: u.username for u in
+             db.query(User).filter(User.tenant_id == tenant_id).all()}
+    return {
+        "tenant_id": tenant_id,
+        "tenant_name": tenant.name if tenant else None,
+        "exported_at": _now_iso(),
+        "note": ("Audit rows written before Round 3 have created_at null: "
+                 "their time is unknown and was not backfilled. "
+                 "rule_code/rule_version are shown only for audit rows "
+                 "that concern a specific finding; draft transitions "
+                 "cite no single rule, so those fields are null there."),
+        "rows_without_timestamp": sum(1 for r in rows if r["created_at"] is None),
+        "rows": rows,
+        "notifications": [{"id": n.id,
+                           "recipient": users.get(n.recipient_id),
+                           "recipient_role": n.recipient_role,
+                           "draft_id": n.draft_id, "kind": n.kind,
+                           "status": n.status, "reason": n.reason,
+                           "created_at": n.created_at} for n in notes],
     }
 
 
