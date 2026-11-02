@@ -133,3 +133,30 @@ class AuditLog(Base):
     entity = Column(String, nullable=False)
     entity_id = Column(Integer, nullable=True)
     detail = Column(Text, nullable=True, default="")
+    # Round 3: ISO UTC timestamp, set when the row is written. NULL for
+    # rows written before Round 3 — those times are unknown and are
+    # NEVER backfilled with invented values; the export says so.
+    created_at = Column(String, nullable=True)
+
+
+class Notification(Base):
+    """One email-notification attempt for one recipient (Round 3).
+
+    Email-first notifications, not an in-app inbox: this table is only
+    the honest record of each attempt, so an unsent notification is
+    visible instead of silently dropped. status is "sent" ONLY when
+    mailer.send_email returned True; otherwise "unsent" with a reason
+    ("SMTP not configured", "no verified email on file", or
+    "send failed"). Demo users have no email on file, so their attempts
+    are recorded unsent — never marked sent. Recipients are always
+    from the same tenant as the draft; nothing crosses tenants."""
+    __tablename__ = "notifications"
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    recipient_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    recipient_role = Column(String, nullable=False, default="")
+    draft_id = Column(Integer, ForeignKey("drafts.id"), nullable=True)
+    kind = Column(String, nullable=False, default="")  # action_needed | decision
+    status = Column(String, nullable=False, default="unsent")  # sent | unsent
+    reason = Column(String, nullable=True, default="")
+    created_at = Column(String, nullable=True)
