@@ -69,5 +69,18 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     action VARCHAR NOT NULL,
     entity VARCHAR NOT NULL,
     entity_id INTEGER,
-    detail TEXT DEFAULT ''
+    detail TEXT DEFAULT '',
+    created_at TEXT -- Round 3; NULL for rows written before Round 3 (time unknown, never backfilled)
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+    recipient_id INTEGER REFERENCES users(id),
+    recipient_role VARCHAR NOT NULL DEFAULT '',
+    draft_id INTEGER REFERENCES drafts(id),
+    kind VARCHAR NOT NULL DEFAULT '',
+    status VARCHAR NOT NULL DEFAULT 'unsent',
+    reason VARCHAR DEFAULT '',
+    created_at TEXT
 );
