@@ -127,6 +127,8 @@ export const api = {
       body: JSON.stringify({ text }),
     }),
   getHistory: (id) => apiFetch(`/drafts/${id}/history`),
+  getAuditExport: (tenantId) =>
+    apiFetch(`/tenants/${encodeURIComponent(tenantId)}/audit-export`),
   getInsights: (tenantId) =>
     apiFetch(tenantId ? `/insights?tenant_id=${encodeURIComponent(tenantId)}` : "/insights"),
   publishDraft: (id) =>
